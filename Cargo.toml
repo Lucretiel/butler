@@ -6,6 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libc = "0.2.153"
+cooked-waker = "5.0.0"
+futures-core = { version = "0.3.30", default-features = false }
+futures-util = { version = "0.3.30", default-features = false }
+libc = { version = "0.2.153", default-features = false }
 mio = { version = "0.8.10", features = ["os-poll", "net"] }
+pin-project = "1.1.4"
 slab = "0.4.9"

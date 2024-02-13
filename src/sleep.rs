@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     collections::{binary_heap::PeekMut, BinaryHeap},
     future::Future,
     mem,
@@ -11,6 +12,7 @@ use slab::Slab;
 
 use crate::Runtime;
 
+#[derive(Debug)]
 struct Timer {
     deadline: Instant,
     key: usize,
@@ -36,16 +38,19 @@ impl Ord for Timer {
     }
 }
 
+#[derive(Debug)]
 enum EntryState {
     Pending(Waker),
     Done,
 }
 
+#[derive(Debug)]
 struct Entry {
     deadline: Instant,
     state: EntryState,
 }
 
+#[derive(Debug)]
 pub struct Sleepers {
     timers: BinaryHeap<Timer>,
     entries: Slab<Entry>,
@@ -74,8 +79,7 @@ impl Sleepers {
             if let Some(entry) = self.entries.get_mut(key) {
                 // If there is an entry, but the deadline is different. This
                 // means that this entry is actually associated with a
-                // different timer, because the old timer was dropped, so we
-                // ignore it.
+                // different timer; this timer is dead, so we ignore it.
                 if entry.deadline != timer.deadline {
                 }
                 // If there is an entry, and it's in the future, use it as the
@@ -107,13 +111,32 @@ pub struct Sleep<'a> {
     state: SleepState,
 }
 
+impl Sleep<'_> {
+    pub fn deadline(&self) -> Instant {
+        match self.state {
+            SleepState::Pending(deadline) => deadline,
+            SleepState::Polled(key) => {
+                self.runtime
+                    .state
+                    .borrow()
+                    .sleepers
+                    .entries
+                    .get(key)
+                    .expect("entry shouldn't be removed while Sleep exists")
+                    .deadline
+            }
+        }
+    }
+}
+
 impl Future for Sleep<'_> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let waker = cx.waker();
         let this = self.get_mut();
-        let mut sleepers = this.runtime.sleepers.borrow_mut();
+        let mut runtime = this.runtime.state.borrow_mut();
+        let sleepers = &mut runtime.sleepers;
 
         match this.state {
             SleepState::Pending(deadline) => {
@@ -154,8 +177,8 @@ impl Drop for Sleep<'_> {
         match self.state {
             SleepState::Pending(_) => {}
             SleepState::Polled(key) => {
-                let mut sleepers = self.runtime.sleepers.borrow_mut();
-                sleepers.entries.remove(key);
+                let mut runtime = self.runtime.state.borrow_mut();
+                runtime.sleepers.entries.remove(key);
             }
         }
     }

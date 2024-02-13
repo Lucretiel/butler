@@ -1,4 +1,5 @@
 mod sleep;
+//mod tasks;
 mod tcp;
 
 use std::cell::RefCell;
@@ -16,12 +17,20 @@ use std::{
 
 use slab::Slab;
 
-use crate::sleep::{Sleep, Sleepers};
+use crate::sleep::Sleepers;
 
-pub struct Runtime {
-    sleepers: RefCell<Sleepers>,
-    waker: Waker,
+// Parts of the waker that need to live in a refcell
+#[derive(Debug)]
+struct RuntimeState {
+    sleepers: Sleepers,
     poll: mio::Poll,
+    io_wakers: Slab<Waker>,
+}
+
+#[derive(Debug)]
+pub struct Runtime {
+    state: RefCell<RuntimeState>,
+    waker: Waker,
 }
 
 pub trait Task {
@@ -30,7 +39,8 @@ pub trait Task {
     fn start(self, runtime: &Runtime) -> impl Future<Output = Self::Output> + '_;
 }
 
-const BUTLER_WAKER_TOKEN: mio::Token = mio::Token(10_000_000_000);
+const BUTLER_WAKER_TOKEN: mio::Token = mio::Token(0);
+const EXTERNAL_WAKER_BASE: usize = 1;
 
 pub fn run<T: Task>(task: T) -> io::Result<T::Output> {
     let mut poll = mio::Poll::new()?;
@@ -41,9 +51,12 @@ pub fn run<T: Task>(task: T) -> io::Result<T::Output> {
     }));
 
     let mut runtime = Runtime {
-        sleepers: RefCell::new(Sleepers::new()),
+        state: RefCell::new(RuntimeState {
+            sleepers: Sleepers::new(),
+            io_wakers: Slab::new(),
+            poll,
+        }),
         waker,
-        poll,
     };
 
     let mut context = Context::from_waker(&runtime.waker);
@@ -56,17 +69,44 @@ pub fn run<T: Task>(task: T) -> io::Result<T::Output> {
             break Ok(out);
         }
 
-        let mut sleepers = runtime.sleepers.borrow_mut();
-        let deadline = sleepers.get_next_wakeup(Instant::now());
-        let timeout = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let mut state = runtime.state.borrow_mut();
+        let mut idle = true;
 
-        match runtime.poll.poll(&mut events, timeout) {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
+        while idle {
+            let now = Instant::now();
+            let deadline = state.sleepers.get_next_wakeup(Instant::now());
+            let timeout =
+                deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+
+            match state.poll.poll(&mut events, timeout) {
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::TimedOut => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+
+            // `Poll::poll` doesn't provide any convenient ways to detect if a
+            // timeout occurred. We could manually check now, but we instead assume
+            // that if a timeout occurred, no events will be enqueued and
+            // `idle` will remain true, so we'll immediately be looping back to
+            // `get_next_wakeup`, which will trigger any needed timeouts.
+
+            events.iter().for_each(|event| {
+                let token = event.token();
+
+                if token == BUTLER_WAKER_TOKEN {
+                    idle = true;
+                } else {
+                    let idx = token.0 - EXTERNAL_WAKER_BASE;
+
+                    if let Some(waker) = state.io_wakers.get(idx) {
+                        waker.wake_by_ref();
+                    } else {
+                        // TODO: warning
+                    }
+                }
+            });
         }
-
-        for event in events.iter() {}
     }
 }
 

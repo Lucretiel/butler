@@ -14,6 +14,7 @@ impl Runtime {
     pub fn connect(&self, address: SocketAddr) -> Connect<'_> {
         let stream = mio::net::TcpStream::connect(address).and_then(|mut stream| {
             self.poll
+                .borrow_mut()
                 .registry()
                 .register(&mut stream, crate::BUTLER_WAKER_TOKEN, Interest::WRITABLE)
                 .map(|()| stream)
@@ -54,6 +55,7 @@ impl Future for Connect<'_> {
     }
 }
 
-pub struct TcpStream {
+pub struct TcpStream<'a> {
+    runtime: &'a Runtime,
     mio_stream: mio::net::TcpStream,
 }
